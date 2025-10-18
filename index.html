@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Painel BI – Faturamento 2025</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    :root{ --bg:#0b0b0e; --panel:#121218; --muted:#8b8ca3; --text:#e5e7eb; --accent:#22d3ee; --ok:#22c55e; --warn:#fde047; }
+    *{ box-sizing:border-box }
+    body{ margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial; }
+    header{ padding:24px 28px; border-bottom:1px solid #1f2030; display:flex; align-items:center; gap:16px; flex-wrap:wrap; justify-content:space-between; background:linear-gradient(180deg,#0b0b0e 0%,#0b0b0e 60%,#0e0f16 100%); }
+    .title{ font-size:20px; font-weight:600; letter-spacing:.3px; }
+    .controls{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    button,select{ background:#1b1c25; color:var(--text); border:1px solid #2a2b3e; padding:10px 14px; border-radius:10px; cursor:pointer; }
+    .container{ padding:22px; max-width:1400px; margin:0 auto; }
+    .kpis{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:18px; }
+    .card{ background:var(--panel); border:1px solid #1f2030; border-radius:16px; padding:18px; }
+    .kpi .label{ color:var(--muted); font-size:12px; text-transform:uppercase; }
+    .kpi .value{ font-size:24px; font-weight:700; margin-top:6px; }
+    .grid{ display:grid; gap:16px; grid-template-columns:1.2fr 1fr; grid-auto-rows:minmax(340px,auto); }
+    canvas{ width:100%!important; height:100%!important; }
+    footer{ text-align:center; color:#8b8ca3; font-size:13px; margin-top:40px; padding:20px; border-top:1px solid #1f2030; }
+    footer a{ color:#22d3ee; text-decoration:none; }
+    @media (max-width:1100px){ .kpis{ grid-template-columns:repeat(2,1fr) } .grid{ grid-template-columns:1fr } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">Painel BI – Faturamento & Lucro · 2025</div>
+    <div class="controls">
+      <select id="yearSelect">
+        <option value="2025" selected>2025</option>
+        <option value="2024">2024</option>
+        <option value="2023">2023</option>
+      </select>
+      <button id="refreshBtn">Atualizar dados</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <section class="kpis">
+      <div class="card kpi"><div class="label">Total Faturado (Ano)</div><div class="value" id="kpiFaturamento">—</div></div>
+      <div class="card kpi"><div class="label">Total de Custos (Ano)</div><div class="value" id="kpiCustos">—</div></div>
+      <div class="card kpi"><div class="label">Lucro Acumulado (Ano)</div><div class="value" id="kpiLucro">—</div></div>
+      <div class="card kpi"><div class="label">Margem (%)</div><div class="value" id="kpiMargem">—</div></div>
+    </section>
+
+    <section class="grid">
+      <div class="card"><canvas id="chartFatLucro"></canvas></div>
+      <div class="card"><canvas id="chartFatServ"></canvas></div>
+      <div class="card"><canvas id="chartFaturamento"></canvas></div>
+      <div class="card"><canvas id="chartCustosServ"></canvas></div>
+    </section>
+  </div>
+
+  <footer>
+    Painel desenvolvido por <strong>André Aguiar</strong> · Criador e Curador do site <a href="https://a2digitalhub.com.br/" target="_blank">A2 Digital Hub</a>
+  </footer>
+
+  <script>
+    const SHEET_ID = "1eV4k_uqhOgGFVFKSkb8zhdnpnaljnRgIWpSouHIqAes";
+    const GVIZ_CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv`;
+    const monthLabels = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+    const brl = v => new Intl.NumberFormat('pt-BR',{ style:'currency', currency:'BRL' }).format(v||0);
+
+    function safeString(x){ return (x===undefined || x===null) ? "" : String(x); }
+
+    function parseNum(x){
+      if (x===undefined || x===null) return 0;
+      const cleaned = String(x).replace(/[\u00A0\s]/g,'').replace(/[^0-9,.-]/g,'');
+      const n = parseFloat(cleaned.replace(/\./g,'').replace(',', '.'));
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    function parseDate(s){
+      if (s===undefined || s===null) return null;
+      const str = String(s).trim();
+      if (!str || typeof str.match !== 'function') return null;
+      const m = str.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+      if (!m) return null;
+      const dd = +m[1], mo = +m[2], y = +m[3];
+      if (dd>=1 && dd<=31 && mo>=1 && mo<=12) return { y, mo };
+      return null;
+    }
+
+    async function loadData(){
+      const res = await fetch(GVIZ_CSV_URL, { cache: 'no-store' });
+      if (!res.ok){ throw new Error('Falha ao ler a planilha (verifique se está pública para leitura).'); }
+      const csv = await res.text();
+      return new Promise((resolve)=>{
+        Papa.parse(csv, { header:true, skipEmptyLines:true, complete: (o)=> resolve(o.data) });
+      });
+    }
+
+    function getCol(obj, names){
+      for (const n of names){ if (Object.prototype.hasOwnProperty.call(obj,n) && obj[n] !== undefined) return obj[n]; }
+      return undefined;
+    }
+
+    function aggregate(rows, yearTarget){
+      const fatM = Array(12).fill(0);
+      const lucM = Array(12).fill(0);
+      const fatS = {};
+      const cusS = {};
+      let fatT=0, cusT=0, lucT=0;
+
+      rows.forEach(r => {
+        const compRaw = getCol(r, ["COMPETENCIA","Competencia","competencia"]);
+        const d = parseDate(compRaw);
+        if (!d || d.y !== yearTarget) return;
+        const mIdx = Math.max(0, Math.min(11, (d.mo||1)-1));
+
+        const serv = safeString(getCol(r,["SERVICO","Servico","servico"])) || "—";
+        const fat = parseNum(getCol(r,["FATURAMENTO ","FATURAMENTO","Faturamento","faturamento"]));
+        const cus = parseNum(getCol(r,["CUSTO","Custo","custo"]));
+        const luc = parseNum(getCol(r,["LUCRO","Lucro","lucro"]));
+
+        fatM[mIdx] += fat;  lucM[mIdx] += luc;
+        fatS[serv] = (fatS[serv]||0) + fat;
+        cusS[serv] = (cusS[serv]||0) + cus;
+        fatT += fat; cusT += cus; lucT += luc;
+      });
+
+      return { fatM, lucM, fatS, cusS, fatT, cusT, lucT };
+    }
+
+    function drawCharts(a){
+      const elFatLucro = document.getElementById('chartFatLucro');
+      const elFatServ  = document.getElementById('chartFatServ');
+      const elFatMes   = document.getElementById('chartFaturamento');
+      const elCusServ  = document.getElementById('chartCustosServ');
+
+      document.getElementById('kpiFaturamento').textContent = brl(a.fatT);
+      document.getElementById('kpiCustos').textContent      = brl(a.cusT);
+      document.getElementById('kpiLucro').textContent       = brl(a.lucT);
+      document.getElementById('kpiMargem').textContent      = ((a.lucT / (a.fatT||1)) * 100).toFixed(1) + '%';
+
+      [elFatLucro, elFatServ, elFatMes, elCusServ].forEach(el=>{ if (el && el._chart) el._chart.destroy(); });
+
+      elFatLucro._chart = new Chart(elFatLucro, {
+        type: 'line',
+        data: { labels: monthLabels, datasets: [
+          { label:'Faturamento', data:a.fatM, tension:.3, borderWidth:2, pointRadius:2 },
+          { label:'Lucro', data:a.lucM, tension:.3, borderWidth:2, pointRadius:2 }
+        ]},
+        options: {
+          responsive:true, maintainAspectRatio:false,
+          scales:{ x:{ ticks:{ color:'#aab' }, grid:{ color:'rgba(255,255,255,.06)'} }, y:{ ticks:{ color:'#aab', callback:v=>brl(v) }, grid:{ color:'rgba(255,255,255,.06)'} } },
+          plugins:{ legend:{ labels:{ color:'#cfd3dc' } }, tooltip:{ callbacks:{ label: c => `${c.dataset.label}: ${brl(c.parsed.y)}` } } }
+        }
+      });
+
+      elFatMes._chart = new Chart(elFatMes, {
+        type:'bar',
+        data:{ labels: monthLabels, datasets:[ { label:'Faturamento', data:a.fatM, borderWidth:1 } ] },
+        options:{ responsive:true, maintainAspectRatio:false, scales:{ x:{ ticks:{ color:'#aab' }, grid:{ display:false } }, y:{ ticks:{ color:'#aab', callback:v=>brl(v) }, grid:{ color:'rgba(255,255,255,.06)' } } }, plugins:{ legend:{ labels:{ color:'#cfd3dc' } } } }
+      });
+
+      elFatServ._chart = new Chart(elFatServ, {
+        type:'doughnut',
+        data:{ labels:Object.keys(a.fatS), datasets:[ { data:Object.values(a.fatS) } ] },
+        options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ labels:{ color:'#cfd3dc' } }, tooltip:{ callbacks:{ label: c => `${c.label}: ${brl(c.parsed)}` } } }, cutout:'58%' }
+      });
+
+      elCusServ._chart = new Chart(elCusServ, {
+        type:'bar',
+        data:{ labels:Object.keys(a.cusS), datasets:[ { label:'Custos', data:Object.values(a.cusS), borderWidth:1 } ] },
+        options:{ responsive:true, maintainAspectRatio:false, indexAxis:'y', scales:{ x:{ ticks:{ color:'#aab', callback:v=>brl(v) }, grid:{ color:'rgba(255,255,255,.06)' } }, y:{ ticks:{ color:'#aab' }, grid:{ display:false } } }, plugins:{ legend:{ labels:{ color:'#cfd3dc' } } } }
+      });
+    }
+
+    async function bootstrap(){
+      try{
+        const ano = +document.getElementById('yearSelect').value;
+        const rows = await loadData();
+        const aggr = aggregate(rows, ano);
+        drawCharts(aggr);
+      }catch(err){
+        console.error(err);
+        alert('Erro ao carregar o painel: '+err.message);
+      }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', bootstrap);
+    document.getElementById('yearSelect').addEventListener('change', bootstrap);
+    bootstrap();
+  </script>
+</body>
+</html>
